@@ -2,8 +2,9 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 
-function getSafeMongoUri(uri: string): string {
+function getSafeMongoUri(rawUri: string): string {
   try {
+    const uri = rawUri.trim().replace(/^['"]+|['"]+$/g, '');
     const match = uri.match(/^(mongodb(?:\+srv)?:\/\/)([^:]+):([^@]+)@(.+)$/);
     if (match) {
       const [, protocol, user, pass, rest] = match;
@@ -11,24 +12,32 @@ function getSafeMongoUri(uri: string): string {
       const safeUser = encodeURIComponent(decodeURIComponent(user));
       return `${protocol}${safeUser}:${safePass}@${rest}`;
     }
+    return uri;
   } catch {
-    // fallback to original
+    return rawUri;
   }
-  return uri;
 }
 
 function getFreshUri(): string {
+  // 1. Prioritize process.env (Vercel production environment)
+  const envUri = process.env.MONGODB_URI;
+  if (envUri && envUri.trim()) {
+    return getSafeMongoUri(envUri);
+  }
+
+  // 2. Fallback to local .env.local file
   try {
     const envPath = path.resolve(process.cwd(), '.env.local');
     if (fs.existsSync(envPath)) {
       const content = fs.readFileSync(envPath, 'utf-8');
       const match = content.match(/MONGODB_URI=["']?([^"'\r\n]+)["']?/);
       if (match && match[1]) {
-        return getSafeMongoUri(match[1].trim());
+        return getSafeMongoUri(match[1]);
       }
     }
   } catch {}
-  return process.env.MONGODB_URI ? getSafeMongoUri(process.env.MONGODB_URI) : '';
+
+  return '';
 }
 
 interface MongooseCache {
