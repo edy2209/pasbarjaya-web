@@ -3,7 +3,7 @@ name: Auto Refresh Clan Data
 on:
   schedule:
     - cron: '*/30 * * * *'  # Setiap 30 menit
-  workflow_dispatch:        # Bisa trigger manual juga dari GitHub
+  workflow_dispatch:        # Bisa trigger manual dari GitHub
 
 jobs:
   refresh:
@@ -11,13 +11,11 @@ jobs:
     steps:
       - name: Refresh CoC Clan Cache
         run: |
-          response=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "x-refresh-secret: ${{ secrets.REFRESH_SECRET }}" \
-            https://pasbarjaya.vercel.app/api/clan/refresh)
-          body=$(echo "$response" | head -n -1)
-          status=$(echo "$response" | tail -n 1)
-          echo "Status: $status"
-          echo "Response: $body"
-          if [ "$status" != "200" ]; then
-            echo "::warning::Refresh failed with status $status"
+          response=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://pasbarjaya.vercel.app/api/cron/refresh-clan)
+          echo "HTTP Status: $response"
+          if [ "$response" = "200" ]; then
+            echo "✅ Clan data refreshed successfully"
+          else
+            echo "⚠️ Refresh returned status $response (stale cache will be used)"
           fi
