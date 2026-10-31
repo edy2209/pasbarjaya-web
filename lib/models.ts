@@ -172,12 +172,31 @@ const AdminUserSchema = new Schema<IAdminUser>(
 );
 
 // ============================================================
+// 5. CLAN CACHE MODEL — simpan data CoC di MongoDB
+// ============================================================
+export interface IClanCache extends Document {
+  clanTag: string;
+  data: Record<string, any>; // ClanData as plain object
+  cachedAt: Date;
+}
+
+const ClanCacheSchema = new Schema<IClanCache>(
+  {
+    clanTag: { type: String, required: true, unique: true },
+    data: { type: Schema.Types.Mixed, required: true },
+    cachedAt: { type: Date, default: Date.now },
+  },
+  { timestamps: false }
+);
+
+// ============================================================
 // EXPORT MODELS (force-reset cache so schema changes apply)
 // ============================================================
 if (mongoose.models.Highlight) delete mongoose.models.Highlight;
 if (mongoose.models.ClanEvent) delete mongoose.models.ClanEvent;
 if (mongoose.models.Feedback) delete mongoose.models.Feedback;
 if (mongoose.models.AdminUser) delete mongoose.models.AdminUser;
+if (mongoose.models.ClanCache) delete mongoose.models.ClanCache;
 
 export const Highlight: Model<IHighlight> =
   mongoose.model<IHighlight>('Highlight', HighlightSchema);
@@ -190,3 +209,6 @@ export const Feedback: Model<IFeedback> =
 
 export const AdminUser: Model<IAdminUser> =
   mongoose.model<IAdminUser>('AdminUser', AdminUserSchema);
+
+export const ClanCache: Model<IClanCache> =
+  mongoose.model<IClanCache>('ClanCache', ClanCacheSchema);
