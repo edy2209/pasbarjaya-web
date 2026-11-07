@@ -2,20 +2,26 @@ name: Auto Refresh Clan Data
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Setiap 30 menit
-  workflow_dispatch:        # Bisa trigger manual dari GitHub
+    - cron: '*/15 * * * *'  # Berjalan otomatis setiap 15 menit
+  workflow_dispatch:        # Bisa di-trigger manual kapan saja dari GitHub tab Actions
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
-      - name: Refresh CoC Clan Cache
+      - name: Trigger Clan Cache Refresh via API
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" \
-            https://pasbarjaya.vercel.app/api/cron/refresh-clan)
-          echo "HTTP Status: $response"
-          if [ "$response" = "200" ]; then
-            echo "✅ Clan data refreshed successfully"
+          echo "🔄 Meminta Vercel melakukan refresh data klan dari Supercell API..."
+          response=$(curl -s -w "\n%{http_code}" https://pasbarjaya.vercel.app/api/cron/refresh-clan)
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response Body: $body"
+          echo "HTTP Code: $http_code"
+
+          if [ "$http_code" -eq 200 ]; then
+            echo "✅ Data klan berhasil diperbarui di MongoDB!"
           else
-            echo "⚠️ Refresh returned status $response (stale cache will be used)"
+            echo "❌ Gagal refresh data (Status: $http_code)"
+            exit 1
           fi
