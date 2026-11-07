@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "sync:clan": "node scripts/sync-clan.js",
+    "sync:watch": "node scripts/sync-clan.js --watch"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1159.0",

@@ -4,39 +4,20 @@ import connectMongo from './mongodb';
 import { ClanCache } from './models';
 
 const COC_API_BASE = 'https://api.clashofclans.com/v1';
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 jam
 
 /**
  * Ambil data clan:
- * 1. Coba baca cache dari MongoDB (maks 6 jam)
- * 2. Jika cache expired atau tidak ada → coba CoC API
- * 3. Jika CoC API gagal (IP ban, dll) → gunakan cache lama
- * 4. Jika tidak ada sama sekali → fallback mockData
+ * 1. SELALU panggil langsung ke Supercell API secara real-time (tanpa TTL/cache)!
+ * 2. Simpan hasil terbaru ke MongoDB sebagai backup.
+ * 3. Jika API gagal (misal server down), baru gunakan data terakhir di MongoDB.
+ * 4. Jika MongoDB juga belum ada, fallback mockData.
  */
 export async function fetchClanData(): Promise<ClanData> {
   const rawTag = process.env.COC_CLAN_TAG || '#2JVVR0LLL';
   const clanTag = rawTag.startsWith('#') ? rawTag : `#${rawTag}`;
-
-  // --- 1. Baca cache dari MongoDB ---
-  let cachedEntry: any = null;
-  try {
-    await connectMongo();
-    cachedEntry = await ClanCache.findOne({ clanTag }).lean();
-  } catch (e) {
-    console.warn('MongoDB cache read error:', e);
-  }
-
-  const now = Date.now();
-  const cacheAge = cachedEntry ? now - new Date(cachedEntry.cachedAt).getTime() : Infinity;
-  const cacheIsFresh = cacheAge < CACHE_TTL_MS;
-
-  if (cacheIsFresh && cachedEntry?.data) {
-    console.log('✅ Serving CoC data from MongoDB cache');
-    return cachedEntry.data as ClanData;
-  }
-
-  // --- 2. Coba CoC API ---
   const token = process.env.COC_API_TOKEN;
+
+  // --- 1. SELALU LANGSUNG COBA COC API REALTIME ---
   if (token) {
     try {
       const encodedTag = encodeURIComponent(clanTag);
@@ -49,18 +30,16 @@ export async function fetchClanData(): Promise<ClanData> {
         const data = await res.json();
         const clanData = mapApiResponse(data, rawTag);
 
-        // Simpan ke MongoDB cache
-        try {
-          await ClanCache.findOneAndUpdate(
+        // Update MongoDB secara asynchronous di background sebagai backup
+        connectMongo().then(() => {
+          ClanCache.findOneAndUpdate(
             { clanTag },
             { data: clanData, cachedAt: new Date() },
-            { upsert: true, new: true }
-          );
-          console.log('✅ CoC data fetched from API & saved to MongoDB cache');
-        } catch (e) {
-          console.warn('MongoDB cache write error:', e);
-        }
+            { upsert: true }
+          ).catch((e) => console.warn('MongoDB backup write error:', e));
+        }).catch(() => {});
 
+        console.log('⚡ Serving LIVE real-time CoC data directly from Supercell API!');
         return clanData;
       } else {
         const errText = await res.text();
@@ -71,14 +50,20 @@ export async function fetchClanData(): Promise<ClanData> {
     }
   }
 
-  // --- 3. API gagal → gunakan cache lama walau sudah expired ---
-  if (cachedEntry?.data) {
-    console.warn('⚠️ CoC API failed, serving STALE cache from MongoDB');
-    return cachedEntry.data as ClanData;
+  // --- 2. Fallback: Hanya jika Supercell API gagal, ambil data terakhir di MongoDB ---
+  try {
+    await connectMongo();
+    const cachedEntry: any = await ClanCache.findOne({ clanTag }).lean();
+    if (cachedEntry?.data) {
+      console.warn('⚠️ CoC API down/error, serving fallback from MongoDB');
+      return cachedEntry.data as ClanData;
+    }
+  } catch (e) {
+    console.warn('MongoDB fallback read error:', e);
   }
 
-  // --- 4. Tidak ada sama sekali → mock data ---
-  console.warn('⚠️ No cache available, using mock data');
+  // --- 3. Terakhir: Mock Data jika DB juga kosong ---
+  console.warn('⚠️ No data available, using mock data');
   return mockClanData;
 }
 

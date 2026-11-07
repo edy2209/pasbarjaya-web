@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchClanData } from '@/lib/coc-api';
 
-// GET /api/clan - Fetch live clan data from Supercell API
+// GET /api/clan - Fetch live clan data directly from Supercell API
 export async function GET(_req: NextRequest) {
   try {
     const clan = await fetchClanData();
