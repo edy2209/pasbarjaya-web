@@ -59,3 +59,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: error.message || 'Gagal generate presigned URL' }, { status: 500 });
   }
 }
+
