@@ -247,55 +247,68 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
     setUploadingFile(true);
     setUploadProgress(5);
     try {
-      // 1. Dapatkan Presigned URL untuk Video
-      const presignRes = await fetch('/api/upload/presign', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileType: file.type,
-          folder: 'highlights',
-        }),
-      });
-      const presignData = await presignRes.json();
+      let videoPublicUrl = '';
 
-      if (!presignData.success || !presignData.uploadUrl) {
-        throw new Error(presignData.error || 'Gagal menyiapkan URL upload R2');
+      // OPSI A: Coba Direct Presigned Upload ke Cloudflare R2
+      let directSuccess = false;
+      try {
+        const presignRes = await fetch('/api/upload/presign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: file.name,
+            fileType: file.type,
+            folder: 'highlights',
+          }),
+        });
+        const presignData = await presignRes.json();
+
+        if (presignData.success && presignData.uploadUrl) {
+          const uploadOk = await uploadDirectToR2(file, presignData.uploadUrl, (pct) => {
+            setUploadProgress(Math.min(85, Math.max(5, Math.round(pct * 0.85))));
+          });
+          if (uploadOk) {
+            videoPublicUrl = presignData.publicUrl;
+            directSuccess = true;
+          }
+        }
+      } catch (directErr) {
+        console.warn('Direct R2 presign upload failed, falling back to server upload...', directErr);
       }
 
-      // 2. Direct Upload Video ke Cloudflare R2
-      const uploadOk = await uploadDirectToR2(file, presignData.uploadUrl, (pct) => {
-        // Skala 5% - 85% untuk video
-        setUploadProgress(Math.min(85, Math.max(5, Math.round(pct * 0.85))));
-      });
+      // OPSI B (Fallback): Jika direct upload gagal/CORS belum diatur di R2, upload via server endpoint
+      if (!directSuccess) {
+        console.log('Menggunakan fallback server upload...');
+        setUploadProgress(30);
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('folder', 'highlights');
 
-      if (!uploadOk) {
-        throw new Error('Gagal mengupload video langsung ke Cloudflare R2');
+        const fallbackRes = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        const fallbackData = await fallbackRes.json();
+        if (!fallbackData.success || !fallbackData.url) {
+          throw new Error(fallbackData.error || 'Upload gagal ke server R2. Pastikan CORS diaktifkan di dashboard R2 atau file tidak melebihi batas.');
+        }
+        videoPublicUrl = fallbackData.url;
       }
 
-      const videoPublicUrl = presignData.publicUrl;
       setUploadProgress(90);
 
-      // 3. Otomatis ekstrak frame video & upload thumbnail
+      // Otomatis ekstrak frame video & upload thumbnail
       let generatedThumbUrl = '';
       try {
         const thumbBlob = await extractVideoThumbnail(file);
         if (thumbBlob) {
-          const thumbPresignRes = await fetch('/api/upload/presign', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fileName: `thumb_${Date.now()}.jpg`,
-              fileType: 'image/jpeg',
-              folder: 'highlights',
-            }),
-          });
-          const thumbPresignData = await thumbPresignRes.json();
-          if (thumbPresignData.success && thumbPresignData.uploadUrl) {
-            const thumbOk = await uploadDirectToR2(thumbBlob, thumbPresignData.uploadUrl);
-            if (thumbOk) {
-              generatedThumbUrl = thumbPresignData.publicUrl;
-            }
+          const thumbFormData = new FormData();
+          thumbFormData.append('file', thumbBlob, `thumb_${Date.now()}.jpg`);
+          thumbFormData.append('folder', 'highlights');
+          const thumbRes = await fetch('/api/upload', { method: 'POST', body: thumbFormData });
+          const thumbData = await thumbRes.json();
+          if (thumbData.success) {
+            generatedThumbUrl = thumbData.url;
           }
         }
       } catch {
@@ -314,7 +327,7 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
       showToast('success', 'Video berhasil diupload ke Cloudflare R2!');
     } catch (err: any) {
       console.error('Upload error:', err);
-      showToast('error', err.message || 'Upload gagal. Periksa koneksi internet atau konfigurasi R2.');
+      showToast('error', err.message || 'Upload gagal. Periksa koneksi internet atau CORS Cloudflare R2.');
     } finally {
       setUploadingFile(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
