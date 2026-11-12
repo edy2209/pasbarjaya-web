@@ -72,6 +72,7 @@ export default function AdminHighlightsPage() {
   const [filterType, setFilterType] = useState<'all' | 'classic' | 'cwl'>('all');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const showToast = (type: 'success' | 'error', msg: string) => {
     setToast({ type, msg });
@@ -200,6 +201,39 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
   });
 }
 
+  const uploadDirectToR2 = (file: File | Blob, uploadUrl: string, onProgress?: (pct: number) => void): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', uploadUrl, true);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+      if (xhr.upload && onProgress) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            onProgress(pct);
+          }
+        };
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(true);
+        } else {
+          console.error('XHR Upload status error:', xhr.status, xhr.responseText);
+          resolve(false);
+        }
+      };
+
+      xhr.onerror = () => {
+        console.error('XHR Upload network error');
+        resolve(false);
+      };
+
+      xhr.send(file);
+    });
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -211,45 +245,76 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
     }
 
     setUploadingFile(true);
+    setUploadProgress(5);
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('folder', 'highlights');
+      // 1. Dapatkan Presigned URL untuk Video
+      const presignRes = await fetch('/api/upload/presign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileType: file.type,
+          folder: 'highlights',
+        }),
+      });
+      const presignData = await presignRes.json();
 
-      const res = await fetch('/api/upload', { method: 'POST', body: formData });
-      const data = await res.json();
+      if (!presignData.success || !presignData.uploadUrl) {
+        throw new Error(presignData.error || 'Gagal menyiapkan URL upload R2');
+      }
 
-      if (data.success) {
-        let generatedThumbUrl = '';
-        try {
-          // Otomatis ekstrak frame video jadi thumbnail
-          const thumbBlob = await extractVideoThumbnail(file);
-          if (thumbBlob) {
-            const thumbFormData = new FormData();
-            thumbFormData.append('file', thumbBlob, `thumb_${Date.now()}.jpg`);
-            thumbFormData.append('folder', 'highlights');
-            const thumbRes = await fetch('/api/upload', { method: 'POST', body: thumbFormData });
-            const thumbData = await thumbRes.json();
-            if (thumbData.success) {
-              generatedThumbUrl = thumbData.url;
+      // 2. Direct Upload Video ke Cloudflare R2
+      const uploadOk = await uploadDirectToR2(file, presignData.uploadUrl, (pct) => {
+        // Skala 5% - 85% untuk video
+        setUploadProgress(Math.min(85, Math.max(5, Math.round(pct * 0.85))));
+      });
+
+      if (!uploadOk) {
+        throw new Error('Gagal mengupload video langsung ke Cloudflare R2');
+      }
+
+      const videoPublicUrl = presignData.publicUrl;
+      setUploadProgress(90);
+
+      // 3. Otomatis ekstrak frame video & upload thumbnail
+      let generatedThumbUrl = '';
+      try {
+        const thumbBlob = await extractVideoThumbnail(file);
+        if (thumbBlob) {
+          const thumbPresignRes = await fetch('/api/upload/presign', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileName: `thumb_${Date.now()}.jpg`,
+              fileType: 'image/jpeg',
+              folder: 'highlights',
+            }),
+          });
+          const thumbPresignData = await thumbPresignRes.json();
+          if (thumbPresignData.success && thumbPresignData.uploadUrl) {
+            const thumbOk = await uploadDirectToR2(thumbBlob, thumbPresignData.uploadUrl);
+            if (thumbOk) {
+              generatedThumbUrl = thumbPresignData.publicUrl;
             }
           }
-        } catch {
-          // Fallback handled by video tag
         }
-
-        setForm(prev => ({
-          ...prev,
-          videoUrl: data.url,
-          thumbnailUrl: generatedThumbUrl || prev.thumbnailUrl,
-          isYoutube: false,
-        }));
-        showToast('success', 'Video & thumbnail otomatis berhasil diupload!');
-      } else {
-        showToast('error', data.error || 'Upload gagal. Pastikan Cloudflare R2 sudah dikonfigurasi.');
+      } catch {
+        // Thumbnail opsional
       }
-    } catch {
-      showToast('error', 'Upload gagal. Periksa konfigurasi R2.');
+
+      setUploadProgress(100);
+
+      setForm(prev => ({
+        ...prev,
+        videoUrl: videoPublicUrl,
+        thumbnailUrl: generatedThumbUrl || prev.thumbnailUrl,
+        isYoutube: false,
+      }));
+
+      showToast('success', 'Video berhasil diupload ke Cloudflare R2!');
+    } catch (err: any) {
+      console.error('Upload error:', err);
+      showToast('error', err.message || 'Upload gagal. Periksa koneksi internet atau konfigurasi R2.');
     } finally {
       setUploadingFile(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -259,6 +324,10 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
   const handleSave = async () => {
     if (!form.title || !form.attackerName || !form.defenderName) {
       showToast('error', 'Judul, nama penyerang, dan nama target wajib diisi');
+      return;
+    }
+    if (!form.videoUrl) {
+      showToast('error', 'Video belum diisi! Silakan upload video ke R2 atau masukkan link YouTube.');
       return;
     }
     setSaving(true);
@@ -524,36 +593,70 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
 
                 {/* File Upload to R2 */}
                 <div>
-                  <label className="block text-xs text-slate-500 mb-1.5 flex items-center gap-1.5">
-                    <Upload className="w-3.5 h-3.5 text-sky-400" /> Upload Video ke Cloudflare R2
+                  <label className="block text-xs text-slate-400 font-bold mb-1.5 flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-sky-400" /> Upload Video ke Cloudflare R2 (Direct)
                   </label>
+                  
                   <div
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center justify-center gap-3 px-4 py-4 rounded-xl border-2 border-dashed border-slate-700 hover:border-sky-500/50 cursor-pointer transition-colors"
+                    onClick={() => {
+                      if (!uploadingFile) fileInputRef.current?.click();
+                    }}
+                    className={`flex flex-col items-center justify-center gap-2 p-5 rounded-2xl border-2 border-dashed transition-all ${
+                      uploadingFile 
+                        ? 'border-sky-500 bg-sky-950/20 cursor-wait' 
+                        : form.videoUrl && !form.isYoutube
+                          ? 'border-emerald-500/50 bg-emerald-950/10 cursor-pointer'
+                          : 'border-slate-700 hover:border-sky-500/50 hover:bg-slate-900/60 cursor-pointer'
+                    }`}
                   >
                     {uploadingFile ? (
-                      <><Loader2 className="w-5 h-5 text-sky-400 animate-spin" /><span className="text-sm text-sky-400">Mengupload...</span></>
+                      <div className="w-full space-y-2 text-center">
+                        <div className="flex items-center justify-center gap-2 text-sky-400 font-bold text-sm">
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                          <span>Mengupload langsung ke Cloudflare R2... {uploadProgress}%</span>
+                        </div>
+                        <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                          <div 
+                            className="bg-gradient-to-r from-sky-500 to-emerald-400 h-full transition-all duration-300"
+                            style={{ width: `${uploadProgress}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-slate-400">Harap tunggu hingga upload selesai 100% sebelum klik simpan.</p>
+                      </div>
+                    ) : form.videoUrl && !form.isYoutube ? (
+                      <div className="w-full space-y-2">
+                        <div className="flex items-center justify-between text-xs text-emerald-400 font-bold">
+                          <span className="flex items-center gap-1.5">
+                            <CheckCircle2 className="w-4 h-4" /> Video Siap Digunakan!
+                          </span>
+                          <span className="text-[11px] text-slate-400 underline cursor-pointer">Klik untuk ganti video</span>
+                        </div>
+                        <video 
+                          src={form.videoUrl} 
+                          controls 
+                          className="w-full max-h-48 rounded-xl bg-black object-contain border border-slate-800"
+                        />
+                      </div>
                     ) : (
-                      <><Film className="w-5 h-5 text-slate-500" /><span className="text-sm text-slate-500">Klik untuk pilih video (MP4, WebM)</span></>
+                      <>
+                        <Film className="w-8 h-8 text-slate-500" />
+                        <span className="text-sm font-semibold text-slate-300">Pilih file video perang (MP4, WebM)</span>
+                        <span className="text-[11px] text-slate-500">Mendukung file besar hingga ratusan MB tanpa limit</span>
+                      </>
                     )}
                   </div>
                   <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFileUpload} className="hidden" />
-                  {form.videoUrl && !form.isYoutube && (
-                    <p className="text-[11px] text-emerald-400 mt-1 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" /> Video URL: {form.videoUrl.substring(0, 60)}...
-                    </p>
-                  )}
                 </div>
 
                 {/* Manual URL (R2 or other) */}
                 <div>
-                  <label className="block text-xs text-slate-500 mb-1.5">Atau paste URL video langsung</label>
+                  <label className="block text-xs text-slate-500 mb-1.5">URL Video R2 (Otomatis terisi setelah upload)</label>
                   <input
                     type="url"
                     value={!form.isYoutube ? form.videoUrl : ''}
                     onChange={e => setForm(p => ({ ...p, videoUrl: e.target.value, isYoutube: false }))}
-                    placeholder="https://r2.pasbarjaya.com/highlights/video.mp4"
-                    className="w-full px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white placeholder-slate-600 text-sm focus:outline-none focus:border-sky-500/60"
+                    placeholder="https://pasbarjaya-media.edisyafrianto45.workers.dev/highlights/..."
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white placeholder-slate-600 text-xs font-mono focus:outline-none focus:border-sky-500/60"
                   />
                 </div>
               </div>
@@ -565,7 +668,7 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
                   type="url"
                   value={form.thumbnailUrl}
                   onChange={e => setForm(p => ({ ...p, thumbnailUrl: e.target.value }))}
-                  placeholder="https://... (kosong = auto dari YouTube)"
+                  placeholder="https://... (otomatis di-generate dari video)"
                   className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white placeholder-slate-600 text-sm focus:outline-none focus:border-amber-500/60"
                 />
               </div>
@@ -585,15 +688,20 @@ function extractVideoThumbnail(file: File): Promise<Blob | null> {
               <div className="flex items-center gap-3 pt-2">
                 <button
                   onClick={handleSave}
-                  disabled={saving}
-                  className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-sm transition-colors disabled:opacity-60"
+                  disabled={saving || uploadingFile}
+                  className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-amber-500/20"
                 >
-                  {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                  {saving ? 'Menyimpan...' : editingId ? 'Perbarui Highlight' : 'Simpan Highlight'}
+                  {saving ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /><span>Menyimpan...</span></>
+                  ) : uploadingFile ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /><span>Menunggu Upload Video Selesai...</span></>
+                  ) : (
+                    <><CheckCircle2 className="w-4 h-4" /><span>{editingId ? 'Perbarui Highlight' : 'Simpan Highlight'}</span></>
+                  )}
                 </button>
                 <button
                   onClick={() => { setShowForm(false); setEditingId(null); }}
-                  className="px-6 py-3 rounded-xl bg-slate-800 text-slate-300 font-bold text-sm hover:bg-slate-700 transition-colors"
+                  className="px-6 py-3.5 rounded-xl bg-slate-800 text-slate-300 font-bold text-sm hover:bg-slate-700 transition-colors"
                 >
                   Batal
                 </button>
